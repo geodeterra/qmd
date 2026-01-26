@@ -69,13 +69,17 @@ export function homedir(): string {
  * - Unix paths: /path/to/file
  * - Windows native: C:\path or C:/path
  * - Git Bash: /c/path or /C/path (C-Z drives, excluding A/B floppy drives)
+ * 
+ * Note: /c without trailing slash is treated as Unix path (directory named "c"),
+ * while /c/ or /c/path are treated as Git Bash paths (C: drive).
  */
 export function isAbsolutePath(path: string): boolean {
   if (!path) return false;
   
   // Unix absolute path
   if (path.startsWith('/')) {
-    // Check if it's a Git Bash style path like /c/ or /C/ (C-Z only, not A or B)
+    // Check if it's a Git Bash style path like /c/ or /c/Users (C-Z only, not A or B)
+    // Requires path[2] === '/' to distinguish from Unix paths like /c or /cache
     if (path.length >= 3 && path[2] === '/') {
       const driveLetter = path[1];
       if (driveLetter && /[c-zC-Z]/.test(driveLetter)) {

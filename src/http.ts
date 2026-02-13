@@ -12,7 +12,6 @@
 import {
   createStore,
   extractSnippet,
-  addLineNumbers,
   hybridQuery,
   vectorSearchQuery,
 } from "./store.js";
@@ -24,6 +23,20 @@ export type HttpServerHandle = {
   port: number;
   stop: () => Promise<void>;
 };
+
+const HEADERS = {
+  "Content-Type": "application/json",
+  "Access-Control-Allow-Origin": "*",
+};
+
+function parseParams(req: Request) {
+  const url = new URL(req.url);
+  const q = url.searchParams.get("q") || "";
+  const limit = parseInt(url.searchParams.get("limit") || "20", 10) || 20;
+  const minScore = parseFloat(url.searchParams.get("min_score") || "0") || 0;
+  const collection = url.searchParams.get("collection") || undefined;
+  return { q, limit, minScore, collection };
+}
 
 export async function startHttpServer(port: number, options?: { quiet?: boolean }): Promise<HttpServerHandle> {
   const store = createStore();
@@ -38,115 +51,89 @@ export async function startHttpServer(port: number, options?: { quiet?: boolean 
     return new Date().toISOString().slice(11, 23);
   }
 
-  function parseParams(url: URL) {
-    const q = url.searchParams.get("q") || "";
-    const limit = parseInt(url.searchParams.get("limit") || "20", 10) || 20;
-    const minScore = parseFloat(url.searchParams.get("min_score") || "0") || 0;
-    const collection = url.searchParams.get("collection") || undefined;
-    return { q, limit, minScore, collection };
+  function formatResults(results: Array<{ docid: string; score: number; displayPath: string; title: string; body?: string; bestChunk?: string; context?: string; chunkPos?: number }>, query: string) {
+    return results.map(r => {
+      const text = r.bestChunk || r.body || "";
+      const { snippet } = extractSnippet(text, query, 300, r.chunkPos);
+      return {
+        docid: `#${r.docid}`,
+        score: Math.round(r.score * 100) / 100,
+        file: `qmd://${r.displayPath}`,
+        title: r.title,
+        ...(r.context && { context: r.context }),
+        ...(store.getContextForFile(`qmd://${r.displayPath}`) && {
+          context: store.getContextForFile(`qmd://${r.displayPath}`),
+        }),
+        snippet,
+      };
+    });
   }
 
   const server = Bun.serve({
     port,
     hostname: "0.0.0.0",
-    async fetch(req) {
-      const reqStart = Date.now();
-      const url = new URL(req.url);
-      const path = url.pathname;
-
-      // CORS headers for all responses
-      const headers = {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      };
-
-      try {
-        if (path === "/status" && req.method === "GET") {
+    routes: {
+      "/status": {
+        GET: () => {
+          const reqStart = Date.now();
           const status = store.getStatus();
           const res = Response.json({
             status: "ok",
             uptime: Math.floor((Date.now() - startTime) / 1000),
             ...status,
-          }, { headers });
+          }, { headers: HEADERS });
           log(`${ts()} GET /status (${Date.now() - reqStart}ms)`);
           return res;
-        }
+        },
+      },
 
-        if (path === "/search" && req.method === "GET") {
-          const { q, limit, minScore, collection } = parseParams(url);
-          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers });
+      "/search": {
+        async GET(req: Request) {
+          const reqStart = Date.now();
+          const { q, limit, minScore, collection } = parseParams(req);
+          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers: HEADERS });
 
           const results = store.searchFTS(q, limit, collection as any)
             .filter(r => r.score >= minScore);
 
-          const output = results.map(r => {
-            const { line, snippet } = extractSnippet(r.body || "", q, 300, r.chunkPos);
-            return {
-              docid: `#${r.docid}`,
-              score: Math.round(r.score * 100) / 100,
-              file: `qmd://${r.displayPath}`,
-              title: r.title,
-              ...(store.getContextForFile(`qmd://${r.displayPath}`) && {
-                context: store.getContextForFile(`qmd://${r.displayPath}`),
-              }),
-              snippet,
-            };
-          });
-
+          const output = formatResults(results, q);
           log(`${ts()} GET /search q="${q.slice(0, 60)}" → ${output.length} results (${Date.now() - reqStart}ms)`);
-          return Response.json(output, { headers });
-        }
+          return Response.json(output, { headers: HEADERS });
+        },
+      },
 
-        if (path === "/vsearch" && req.method === "GET") {
-          const { q, limit, minScore, collection } = parseParams(url);
-          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers });
+      "/vsearch": {
+        async GET(req: Request) {
+          const reqStart = Date.now();
+          const { q, limit, minScore, collection } = parseParams(req);
+          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers: HEADERS });
 
           const effectiveMinScore = minScore || 0.3;
           const results = await vectorSearchQuery(store, q, { collection, limit, minScore: effectiveMinScore });
 
-          const output = results.map(r => {
-            const { line, snippet } = extractSnippet(r.body, q, 300);
-            return {
-              docid: `#${r.docid}`,
-              score: Math.round(r.score * 100) / 100,
-              file: `qmd://${r.displayPath}`,
-              title: r.title,
-              ...(r.context && { context: r.context }),
-              snippet,
-            };
-          });
-
+          const output = formatResults(results, q);
           log(`${ts()} GET /vsearch q="${q.slice(0, 60)}" → ${output.length} results (${Date.now() - reqStart}ms)`);
-          return Response.json(output, { headers });
-        }
+          return Response.json(output, { headers: HEADERS });
+        },
+      },
 
-        if (path === "/query" && req.method === "GET") {
-          const { q, limit, minScore, collection } = parseParams(url);
-          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers });
+      "/query": {
+        async GET(req: Request) {
+          const reqStart = Date.now();
+          const { q, limit, minScore, collection } = parseParams(req);
+          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers: HEADERS });
 
           const results = await hybridQuery(store, q, { collection, limit, minScore });
 
-          const output = results.map(r => {
-            const { line, snippet } = extractSnippet(r.bestChunk, q, 300);
-            return {
-              docid: `#${r.docid}`,
-              score: Math.round(r.score * 100) / 100,
-              file: `qmd://${r.displayPath}`,
-              title: r.title,
-              ...(r.context && { context: r.context }),
-              snippet,
-            };
-          });
-
+          const output = formatResults(results, q);
           log(`${ts()} GET /query q="${q.slice(0, 60)}" → ${output.length} results (${Date.now() - reqStart}ms)`);
-          return Response.json(output, { headers });
-        }
+          return Response.json(output, { headers: HEADERS });
+        },
+      },
+    },
 
-        return Response.json({ error: "not found" }, { status: 404, headers });
-      } catch (err: any) {
-        log(`${ts()} ERROR ${path}: ${err.message}`);
-        return Response.json({ error: err.message }, { status: 500, headers });
-      }
+    fetch(req) {
+      return Response.json({ error: "not found" }, { status: 404, headers: HEADERS });
     },
   });
 

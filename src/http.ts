@@ -1,12 +1,11 @@
 #!/usr/bin/env bun
 /**
- * QMD HTTP Server - Plain HTTP API mirroring CLI --json output
+ * QMD HTTP Server — plain HTTP API returning the same JSON as `qmd --json`.
  *
- * Endpoints:
- *   GET /search?q=<query>&limit=N&collection=C&min_score=N
- *   GET /query?q=<query>&limit=N&collection=C&min_score=N
- *   GET /vsearch?q=<query>&limit=N&collection=C&min_score=N
- *   GET /status
+ * GET /search?q=…&limit=N&min_score=N   BM25 keyword search
+ * GET /vsearch?q=…&limit=N&min_score=N  vector (semantic) search
+ * GET /query?q=…&limit=N&min_score=N    hybrid search (BM25 + vector + reranker)
+ * GET /status                            health / collection info
  */
 
 import {
@@ -15,8 +14,8 @@ import {
   hybridQuery,
   vectorSearchQuery,
 } from "./store.js";
-import type { Store } from "./store.js";
 import { disposeDefaultLlamaCpp } from "./llm.js";
+import type { SearchResult } from "./store.js";
 
 export type HttpServerHandle = {
   server: ReturnType<typeof Bun.serve>;
@@ -24,46 +23,84 @@ export type HttpServerHandle = {
   stop: () => Promise<void>;
 };
 
-const HEADERS = {
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const JSON_HEADERS = {
   "Content-Type": "application/json",
   "Access-Control-Allow-Origin": "*",
 };
 
-function parseParams(req: Request) {
-  const url = new URL(req.url);
-  const q = url.searchParams.get("q") || "";
-  const limit = parseInt(url.searchParams.get("limit") || "20", 10) || 20;
-  const minScore = parseFloat(url.searchParams.get("min_score") || "0") || 0;
-  const collection = url.searchParams.get("collection") || undefined;
-  return { q, limit, minScore, collection };
+interface ParsedParams {
+  q: string;
+  limit: number;
+  minScore: number;
+  collection: string | undefined;
 }
 
-export async function startHttpServer(port: number, options?: { quiet?: boolean }): Promise<HttpServerHandle> {
+function parseParams(req: Request): ParsedParams {
+  const url = new URL(req.url);
+  return {
+    q: url.searchParams.get("q") || "",
+    limit: parseInt(url.searchParams.get("limit") || "20", 10) || 20,
+    minScore: parseFloat(url.searchParams.get("min_score") || "0") || 0,
+    collection: url.searchParams.get("collection") || undefined,
+  };
+}
+
+function badRequest(msg: string): Response {
+  return Response.json({ error: msg }, { status: 400, headers: JSON_HEADERS });
+}
+
+function errorResponse(msg: string): Response {
+  return Response.json({ error: msg }, { status: 500, headers: JSON_HEADERS });
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
+export async function startHttpServer(
+  port: number,
+  options?: { quiet?: boolean },
+): Promise<HttpServerHandle> {
   const store = createStore();
   const startTime = Date.now();
   const quiet = options?.quiet ?? false;
 
   function log(msg: string): void {
-    if (!quiet) console.error(msg);
+    if (!quiet) {
+      const ts = new Date().toISOString().slice(11, 23);
+      console.error(`${ts} ${msg}`);
+    }
   }
 
-  function ts(): string {
-    return new Date().toISOString().slice(11, 23);
-  }
-
-  function formatResults(results: Array<{ docid: string; score: number; displayPath: string; title: string; body?: string; bestChunk?: string; context?: string; chunkPos?: number }>, query: string) {
-    return results.map(r => {
+  /** Map raw search/query results to the CLI --json shape. */
+  function toJsonOutput(
+    results: Array<{
+      docid: string;
+      score: number;
+      displayPath: string;
+      title: string;
+      body?: string;
+      bestChunk?: string;
+      context?: string | null;
+      chunkPos?: number;
+    }>,
+    query: string,
+  ) {
+    return results.map((r) => {
       const text = r.bestChunk || r.body || "";
       const { snippet } = extractSnippet(text, query, 300, r.chunkPos);
+      const context =
+        r.context ?? store.getContextForFile(`qmd://${r.displayPath}`);
       return {
         docid: `#${r.docid}`,
         score: Math.round(r.score * 100) / 100,
         file: `qmd://${r.displayPath}`,
         title: r.title,
-        ...(r.context && { context: r.context }),
-        ...(store.getContextForFile(`qmd://${r.displayPath}`) && {
-          context: store.getContextForFile(`qmd://${r.displayPath}`),
-        }),
+        ...(context ? { context } : {}),
         snippet,
       };
     });
@@ -72,33 +109,39 @@ export async function startHttpServer(port: number, options?: { quiet?: boolean 
   const server = Bun.serve({
     port,
     hostname: "0.0.0.0",
+
     routes: {
       "/status": {
-        GET: () => {
+        GET() {
           const reqStart = Date.now();
           const status = store.getStatus();
-          const res = Response.json({
-            status: "ok",
-            uptime: Math.floor((Date.now() - startTime) / 1000),
-            ...status,
-          }, { headers: HEADERS });
-          log(`${ts()} GET /status (${Date.now() - reqStart}ms)`);
-          return res;
+          log(`GET /status (${Date.now() - reqStart}ms)`);
+          return Response.json(
+            { status: "ok", uptime: Math.floor((Date.now() - startTime) / 1000), ...status },
+            { headers: JSON_HEADERS },
+          );
         },
       },
 
       "/search": {
         async GET(req: Request) {
           const reqStart = Date.now();
-          const { q, limit, minScore, collection } = parseParams(req);
-          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers: HEADERS });
+          const { q, limit, minScore } = parseParams(req);
+          if (!q) return badRequest("missing q parameter");
 
-          const results = store.searchFTS(q, limit, collection as any)
-            .filter(r => r.score >= minScore);
+          try {
+            const results = store
+              .searchFTS(q, limit)
+              .filter((r) => r.score >= minScore);
 
-          const output = formatResults(results, q);
-          log(`${ts()} GET /search q="${q.slice(0, 60)}" → ${output.length} results (${Date.now() - reqStart}ms)`);
-          return Response.json(output, { headers: HEADERS });
+            const output = toJsonOutput(results, q);
+            log(`GET /search q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
+            return Response.json(output, { headers: JSON_HEADERS });
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(`GET /search ERROR: ${msg}`);
+            return errorResponse(msg);
+          }
         },
       },
 
@@ -106,14 +149,23 @@ export async function startHttpServer(port: number, options?: { quiet?: boolean 
         async GET(req: Request) {
           const reqStart = Date.now();
           const { q, limit, minScore, collection } = parseParams(req);
-          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers: HEADERS });
+          if (!q) return badRequest("missing q parameter");
 
-          const effectiveMinScore = minScore || 0.3;
-          const results = await vectorSearchQuery(store, q, { collection, limit, minScore: effectiveMinScore });
+          try {
+            const results = await vectorSearchQuery(store, q, {
+              collection,
+              limit,
+              minScore: minScore || 0.3,
+            });
 
-          const output = formatResults(results, q);
-          log(`${ts()} GET /vsearch q="${q.slice(0, 60)}" → ${output.length} results (${Date.now() - reqStart}ms)`);
-          return Response.json(output, { headers: HEADERS });
+            const output = toJsonOutput(results, q);
+            log(`GET /vsearch q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
+            return Response.json(output, { headers: JSON_HEADERS });
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(`GET /vsearch ERROR: ${msg}`);
+            return errorResponse(msg);
+          }
         },
       },
 
@@ -121,45 +173,52 @@ export async function startHttpServer(port: number, options?: { quiet?: boolean 
         async GET(req: Request) {
           const reqStart = Date.now();
           const { q, limit, minScore, collection } = parseParams(req);
-          if (!q) return Response.json({ error: "missing q parameter" }, { status: 400, headers: HEADERS });
+          if (!q) return badRequest("missing q parameter");
 
-          const results = await hybridQuery(store, q, { collection, limit, minScore });
+          try {
+            const results = await hybridQuery(store, q, {
+              collection,
+              limit,
+              minScore,
+            });
 
-          const output = formatResults(results, q);
-          log(`${ts()} GET /query q="${q.slice(0, 60)}" → ${output.length} results (${Date.now() - reqStart}ms)`);
-          return Response.json(output, { headers: HEADERS });
+            const output = toJsonOutput(results, q);
+            log(`GET /query q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
+            return Response.json(output, { headers: JSON_HEADERS });
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(`GET /query ERROR: ${msg}`);
+            return errorResponse(msg);
+          }
         },
       },
     },
 
-    fetch(req) {
-      return Response.json({ error: "not found" }, { status: 404, headers: HEADERS });
+    fetch() {
+      return Response.json({ error: "not found" }, { status: 404, headers: JSON_HEADERS });
     },
   });
 
-  const actualPort = server.port;
-
   let stopping = false;
-  const stop = async () => {
+  async function shutdown(): Promise<void> {
     if (stopping) return;
     stopping = true;
     server.stop();
     store.close();
     await disposeDefaultLlamaCpp();
-  };
+  }
 
   process.on("SIGTERM", async () => {
-    console.error("Shutting down (SIGTERM)...");
-    await stop();
+    log("shutting down (SIGTERM)");
+    await shutdown();
     process.exit(0);
   });
   process.on("SIGINT", async () => {
-    console.error("Shutting down (SIGINT)...");
-    await stop();
+    log("shutting down (SIGINT)");
+    await shutdown();
     process.exit(0);
   });
 
-  log(`QMD HTTP server listening on http://0.0.0.0:${actualPort}`);
-  log(`Endpoints: /search, /vsearch, /query, /status`);
-  return { server, port: actualPort, stop };
+  log(`listening on http://0.0.0.0:${server.port}`);
+  return { server, port: server.port, stop: shutdown };
 }

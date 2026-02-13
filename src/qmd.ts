@@ -2386,6 +2386,72 @@ if (import.meta.main) {
       await querySearch(cli.query, cli.opts);
       break;
 
+    case "http": {
+      const httpPort = Number(cli.values.port) || 7890;
+      const httpCacheDir = Bun.env.XDG_CACHE_HOME
+        ? resolve(Bun.env.XDG_CACHE_HOME, "qmd")
+        : resolve(homedir(), ".cache", "qmd");
+      const httpPidPath = resolve(httpCacheDir, "http.pid");
+
+      const httpSub = cli.args[0];
+      if (httpSub === "stop") {
+        if (!existsSync(httpPidPath)) {
+          console.log("Not running (no PID file).");
+          process.exit(0);
+        }
+        const pid = parseInt(readFileSync(httpPidPath, "utf-8").trim());
+        try {
+          process.kill(pid, 0);
+          process.kill(pid, "SIGTERM");
+          unlinkSync(httpPidPath);
+          console.log(`Stopped QMD HTTP server (PID ${pid}).`);
+        } catch {
+          unlinkSync(httpPidPath);
+          console.log("Cleaned up stale PID file (server was not running).");
+        }
+        process.exit(0);
+      }
+
+      if (cli.values.daemon) {
+        if (existsSync(httpPidPath)) {
+          const existingPid = parseInt(readFileSync(httpPidPath, "utf-8").trim());
+          try {
+            process.kill(existingPid, 0);
+            console.error(`Already running (PID ${existingPid}). Run 'qmd http stop' first.`);
+            process.exit(1);
+          } catch {}
+        }
+        mkdirSync(httpCacheDir, { recursive: true });
+        const httpLogPath = resolve(httpCacheDir, "http.log");
+        const httpLogFd = openSync(httpLogPath, "w");
+        const child = Bun.spawn([process.execPath, import.meta.path, "http", "--port", String(httpPort)], {
+          stdout: httpLogFd,
+          stderr: httpLogFd,
+          stdin: "ignore",
+        });
+        child.unref();
+        closeSync(httpLogFd);
+        writeFileSync(httpPidPath, String(child.pid));
+        console.log(`Started on http://0.0.0.0:${httpPort} (PID ${child.pid})`);
+        console.log(`Logs: ${httpLogPath}`);
+        process.exit(0);
+      }
+
+      process.removeAllListeners("SIGTERM");
+      process.removeAllListeners("SIGINT");
+      const { startHttpServer } = await import("./http.js");
+      try {
+        await startHttpServer(httpPort);
+      } catch (e: any) {
+        if (e?.code === "EADDRINUSE") {
+          console.error(`Port ${httpPort} already in use. Try a different port with --port.`);
+          process.exit(1);
+        }
+        throw e;
+      }
+      break;
+    }
+
     case "mcp": {
       const sub = cli.args[0]; // stop | status | undefined
 
@@ -2504,7 +2570,7 @@ if (import.meta.main) {
       process.exit(1);
   }
 
-  if (cli.command !== "mcp") {
+  if (cli.command !== "mcp" && cli.command !== "http") {
     await disposeDefaultLlamaCpp();
     process.exit(0);
   }

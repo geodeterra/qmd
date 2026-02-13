@@ -15,17 +15,12 @@ import {
   vectorSearchQuery,
 } from "./store.js";
 import { disposeDefaultLlamaCpp } from "./llm.js";
-import type { SearchResult } from "./store.js";
 
 export type HttpServerHandle = {
   server: ReturnType<typeof Bun.serve>;
   port: number;
   stop: () => Promise<void>;
 };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 const JSON_HEADERS = {
   "Content-Type": "application/json",
@@ -48,18 +43,6 @@ function parseParams(req: Request): ParsedParams {
     collection: url.searchParams.get("collection") || undefined,
   };
 }
-
-function badRequest(msg: string): Response {
-  return Response.json({ error: msg }, { status: 400, headers: JSON_HEADERS });
-}
-
-function errorResponse(msg: string): Response {
-  return Response.json({ error: msg }, { status: 500, headers: JSON_HEADERS });
-}
-
-// ---------------------------------------------------------------------------
-// Server
-// ---------------------------------------------------------------------------
 
 export async function startHttpServer(
   port: number,
@@ -111,86 +94,75 @@ export async function startHttpServer(
     hostname: "0.0.0.0",
 
     routes: {
-      "/status": {
-        GET() {
-          const reqStart = Date.now();
-          const status = store.getStatus();
-          log(`GET /status (${Date.now() - reqStart}ms)`);
-          return Response.json(
-            { status: "ok", uptime: Math.floor((Date.now() - startTime) / 1000), ...status },
-            { headers: JSON_HEADERS },
-          );
-        },
+      "/status": () => {
+        const reqStart = Date.now();
+        const status = store.getStatus();
+        log(`GET /status (${Date.now() - reqStart}ms)`);
+        return Response.json(
+          { status: "ok", uptime: Math.floor((Date.now() - startTime) / 1000), ...status },
+          { headers: JSON_HEADERS },
+        );
       },
 
-      "/search": {
-        async GET(req: Request) {
-          const reqStart = Date.now();
-          const { q, limit, minScore } = parseParams(req);
-          if (!q) return badRequest("missing q parameter");
+      "/search": async (req: Request) => {
+        const reqStart = Date.now();
+        const { q, limit, minScore } = parseParams(req);
+        if (!q) {
+          return Response.json({ error: "missing q parameter" }, { status: 400, headers: JSON_HEADERS });
+        }
 
-          try {
-            const results = store
-              .searchFTS(q, limit)
-              .filter((r) => r.score >= minScore);
-
-            const output = toJsonOutput(results, q);
-            log(`GET /search q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
-            return Response.json(output, { headers: JSON_HEADERS });
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log(`GET /search ERROR: ${msg}`);
-            return errorResponse(msg);
-          }
-        },
+        try {
+          const results = store.searchFTS(q, limit).filter((r) => r.score >= minScore);
+          const output = toJsonOutput(results, q);
+          log(`GET /search q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
+          return Response.json(output, { headers: JSON_HEADERS });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`GET /search ERROR: ${msg}`);
+          return Response.json({ error: msg }, { status: 500, headers: JSON_HEADERS });
+        }
       },
 
-      "/vsearch": {
-        async GET(req: Request) {
-          const reqStart = Date.now();
-          const { q, limit, minScore, collection } = parseParams(req);
-          if (!q) return badRequest("missing q parameter");
+      "/vsearch": async (req: Request) => {
+        const reqStart = Date.now();
+        const { q, limit, minScore, collection } = parseParams(req);
+        if (!q) {
+          return Response.json({ error: "missing q parameter" }, { status: 400, headers: JSON_HEADERS });
+        }
 
-          try {
-            const results = await vectorSearchQuery(store, q, {
-              collection,
-              limit,
-              minScore: minScore || 0.3,
-            });
-
-            const output = toJsonOutput(results, q);
-            log(`GET /vsearch q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
-            return Response.json(output, { headers: JSON_HEADERS });
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log(`GET /vsearch ERROR: ${msg}`);
-            return errorResponse(msg);
-          }
-        },
+        try {
+          const results = await vectorSearchQuery(store, q, {
+            collection,
+            limit,
+            minScore: minScore || 0.3,
+          });
+          const output = toJsonOutput(results, q);
+          log(`GET /vsearch q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
+          return Response.json(output, { headers: JSON_HEADERS });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`GET /vsearch ERROR: ${msg}`);
+          return Response.json({ error: msg }, { status: 500, headers: JSON_HEADERS });
+        }
       },
 
-      "/query": {
-        async GET(req: Request) {
-          const reqStart = Date.now();
-          const { q, limit, minScore, collection } = parseParams(req);
-          if (!q) return badRequest("missing q parameter");
+      "/query": async (req: Request) => {
+        const reqStart = Date.now();
+        const { q, limit, minScore, collection } = parseParams(req);
+        if (!q) {
+          return Response.json({ error: "missing q parameter" }, { status: 400, headers: JSON_HEADERS });
+        }
 
-          try {
-            const results = await hybridQuery(store, q, {
-              collection,
-              limit,
-              minScore,
-            });
-
-            const output = toJsonOutput(results, q);
-            log(`GET /query q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
-            return Response.json(output, { headers: JSON_HEADERS });
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log(`GET /query ERROR: ${msg}`);
-            return errorResponse(msg);
-          }
-        },
+        try {
+          const results = await hybridQuery(store, q, { collection, limit, minScore });
+          const output = toJsonOutput(results, q);
+          log(`GET /query q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
+          return Response.json(output, { headers: JSON_HEADERS });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`GET /query ERROR: ${msg}`);
+          return Response.json({ error: msg }, { status: 500, headers: JSON_HEADERS });
+        }
       },
     },
 

@@ -182,6 +182,7 @@ async function handleQuery(req: Request): Promise<Response> {
 const server = Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
+  idleTimeout: 120,
   routes: {
     "/status": handleStatus,
     "/search": handleSearch,

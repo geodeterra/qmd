@@ -2412,19 +2412,22 @@ if (import.meta.main) {
         process.exit(0);
       }
 
+      // Resolve http.ts entrypoint relative to this file
+      const httpEntrypoint = new URL("./http.ts", import.meta.url).pathname;
+
       if (cli.values.daemon) {
         if (existsSync(httpPidPath)) {
           const existingPid = parseInt(readFileSync(httpPidPath, "utf-8").trim());
           try {
             process.kill(existingPid, 0);
-            console.error(`Already running (PID ${existingPid}). Run 'qmd http stop' first.`);
+            console.error(`Already running (PID ${existingPid}). Run qmd http stop first.`);
             process.exit(1);
           } catch {}
         }
         mkdirSync(httpCacheDir, { recursive: true });
         const httpLogPath = resolve(httpCacheDir, "http.log");
         const httpLogFd = openSync(httpLogPath, "w");
-        const child = Bun.spawn([process.execPath, import.meta.path, "http", "--port", String(httpPort)], {
+        const child = Bun.spawn([process.execPath, "run", httpEntrypoint, "--port", String(httpPort)], {
           stdout: httpLogFd,
           stderr: httpLogFd,
           stdin: "ignore",
@@ -2437,18 +2440,14 @@ if (import.meta.main) {
         process.exit(0);
       }
 
-      process.removeAllListeners("SIGTERM");
-      process.removeAllListeners("SIGINT");
-      const { startHttpServer } = await import("./http.js");
-      try {
-        await startHttpServer(httpPort);
-      } catch (e: any) {
-        if (e?.code === "EADDRINUSE") {
-          console.error(`Port ${httpPort} already in use. Try a different port with --port.`);
-          process.exit(1);
-        }
-        throw e;
-      }
+      // Foreground: spawn http.ts directly and wait
+      const httpProc = Bun.spawn([process.execPath, "run", httpEntrypoint, "--port", String(httpPort)], {
+        stdout: "inherit",
+        stderr: "inherit",
+        stdin: "inherit",
+      });
+      await httpProc.exited;
+      process.exit(httpProc.exitCode ?? 0);
       break;
     }
 

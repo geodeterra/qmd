@@ -820,7 +820,7 @@ export class LlamaCpp implements LLM {
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
       const result = await session.prompt(prompt, {
         grammar,
-        maxTokens: 600,
+        maxTokens: 200,
         temperature: 0.7,
         topK: 20,
         topP: 0.8,
@@ -891,7 +891,10 @@ export class LlamaCpp implements LLM {
     const texts = documents.map((doc) => doc.text);
 
     // Use the proper ranking API - returns [{document: string, score: number}] sorted by score
+    const _rs = performance.now();
     const ranked = await context.rankAndSort(query, texts);
+    const _re = performance.now();
+    console.error(`[rerank] rankAndSort: ${(_re-_rs).toFixed(0)}ms for ${texts.length} docs, avg ${((_re-_rs)/texts.length).toFixed(0)}ms/doc, query="${query.slice(0,40)}"`);
 
     // Map back to our result format using the text-to-doc map
     const results: RerankDocumentResult[] = ranked.map((item) => {

@@ -2086,10 +2086,7 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
 
   const llm = getDefaultLlamaCpp();
   // Note: LlamaCpp uses hardcoded model, model parameter is ignored
-  const _es = performance.now();
   const results = await llm.expandQuery(query);
-  const _ee = performance.now();
-  console.error(`[expand] expandQuery: ${(_ee-_es).toFixed(0)}ms for query="${query.slice(0,40)}"`);
 
   // Map Queryable[] → ExpandedQuery[] (same shape, decoupled from llm.ts internals).
   // Filter out entries that duplicate the original query text.
@@ -2679,7 +2676,6 @@ export async function hybridQuery(
   query: string,
   options?: HybridQueryOptions
 ): Promise<HybridQueryResult[]> {
-  const _t0 = performance.now();
   const limit = options?.limit ?? 10;
   const minScore = options?.minScore ?? 0;
   const candidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
@@ -2695,7 +2691,6 @@ export async function hybridQuery(
   // Step 1: BM25 probe — strong signal skips expensive LLM expansion
   const initialFts = store.searchFTS(query, 20)
     .filter(r => !collection || r.collectionName === collection);
-  const _t1 = performance.now();
   const topScore = initialFts[0]?.score ?? 0;
   const secondScore = initialFts[1]?.score ?? 0;
   const hasStrongSignal = initialFts.length > 0
@@ -2709,7 +2704,6 @@ export async function hybridQuery(
     ? []
     : await store.expandQuery(query);
 
-  const _t2 = performance.now();
   hooks?.onExpand?.(query, expanded);
 
   // Seed with initial FTS results (avoid re-running original query FTS)
@@ -2794,11 +2788,9 @@ export async function hybridQuery(
     docChunkMap.set(cand.file, { chunks, bestIdx });
   }
 
-  const _t3 = performance.now();
   // Step 6: Rerank chunks (NOT full bodies)
   hooks?.onRerankStart?.(chunksToRerank.length);
   const reranked = await store.rerank(query, chunksToRerank);
-  const _t4 = performance.now();
   hooks?.onRerankDone?.();
 
   // Step 7: Blend RRF position score with reranker score
@@ -2836,8 +2828,6 @@ export async function hybridQuery(
     };
   }).sort((a, b) => b.score - a.score);
 
-  const _t5 = performance.now();
-  console.error(`[hybridQuery] BM25=${(_t1-_t0).toFixed(0)}ms expand=${(_t2-_t1).toFixed(0)}ms search+fuse+chunk=${(_t3-_t2).toFixed(0)}ms rerank=${(_t4-_t3).toFixed(0)}ms blend=${(_t5-_t4).toFixed(0)}ms total=${(_t5-_t0).toFixed(0)}ms expanded=${expanded.length} chunks=${chunksToRerank.length} strongSignal=${hasStrongSignal}`);
   // Step 8: Dedup by file (safety net — prevents duplicate output)
   const seenFiles = new Set<string>();
   return blended

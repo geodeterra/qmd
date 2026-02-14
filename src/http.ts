@@ -57,6 +57,7 @@ interface ParsedParams {
   limit: number;
   minScore: number;
   collection: string | undefined;
+  fast: boolean;
 }
 
 function parseParams(req: Request): ParsedParams {
@@ -66,6 +67,7 @@ function parseParams(req: Request): ParsedParams {
     limit: parseInt(url.searchParams.get("limit") || "20", 10) || 20,
     minScore: parseFloat(url.searchParams.get("min_score") || "0") || 0,
     collection: url.searchParams.get("collection") || undefined,
+    fast: url.searchParams.get("fast") === "1" || url.searchParams.get("fast") === "true",
   };
 }
 
@@ -159,12 +161,12 @@ async function handleVsearch(req: Request): Promise<Response> {
 
 async function handleQuery(req: Request): Promise<Response> {
   const reqStart = Date.now();
-  const { q, limit, minScore, collection } = parseParams(req);
+  const { q, limit, minScore, collection, fast } = parseParams(req);
   if (!q) {
     return Response.json({ error: "missing q parameter" }, { status: 400, headers: JSON_HEADERS });
   }
   try {
-    const results = await hybridQuery(store, q, { collection, limit, minScore });
+    const results = await hybridQuery(store, q, { collection, limit, minScore, skipExpansion: fast, ...(fast && { candidateLimit: 5 }) });
     const output = toJsonOutput(results, q);
     log(`GET /query q="${q.slice(0, 60)}" → ${output.length} (${Date.now() - reqStart}ms)`);
     return Response.json(output, { headers: JSON_HEADERS });
